@@ -23,6 +23,12 @@ import logging
 import time
 from datetime import datetime, timedelta
 
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if it exists
+load_dotenv()
+
+
 import numpy as np
 import pandas as pd
 import pytz
