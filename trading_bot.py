@@ -20,6 +20,7 @@ Requirements:
 
 import os
 import io
+import yfinance as yf
 import logging
 import time
 import threading
@@ -132,24 +133,21 @@ def is_market_open() -> bool:
 # ─────────────────────────────────────────────
 # DATA HELPERS
 # ─────────────────────────────────────────────
-def get_bars(symbol: str, limit: int = 25, timeframe: TimeFrame = TimeFrame(5, TimeFrameUnit.Minute)) -> pd.DataFrame:
-    """Fetch recent OHLCV bars for a symbol."""
+def get_bars(symbol: str, limit: int = 25, timeframe: TimeFrame = None) -> pd.DataFrame:
+    """Fetch recent OHLCV bars for a symbol from Yahoo Finance (yfinance)."""
     try:
-        # Request data from the last 5 days to ensure we cover weekends/market closes
-        start_time = datetime.now(pytz.utc) - timedelta(days=5)
-        req = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=timeframe,
-            start=start_time,
-        )
-        bars = data_client.get_stock_bars(req).df
-        if isinstance(bars.index, pd.MultiIndex):
-            bars = bars.xs(symbol, level="symbol")
+        # Fetch 5-minute bars over the last 5 days (covers weekends/market closes)
+        ticker = yf.Ticker(symbol)
+        bars = ticker.history(period="5d", interval="5m")
+        if bars.empty:
+            return pd.DataFrame()
+        # Lowercase columns to match standard format (open, high, low, close, volume)
+        bars.columns = [c.lower() for c in bars.columns]
         bars = bars.sort_index()
         # Take only the latest 'limit' bars
         return bars.tail(limit)
     except Exception as e:
-        log.debug(f"Bar fetch failed for {symbol}: {e}")
+        log.debug(f"Yahoo Finance bar fetch failed for {symbol}: {e}")
         return pd.DataFrame()
 
 
