@@ -1,0 +1,17 @@
+# render.yaml  — Deploy on Render as a Background Worker
+# Docs: https://render.com/docs/yaml-spec
+
+services:
+  - type: worker                        # background worker (no HTTP port needed)
+    name: sp500-trading-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python trading_bot.py
+    plan: starter                       # ~$7/mo; keeps the process alive 24/7
+    envVars:
+      - key: ALPACA_API_KEY
+        sync: false                     # set manually in Render dashboard (secret)
+      - key: ALPACA_API_SECRET
+        sync: false                     # set manually in Render dashboard (secret)
+      - key: PYTHON_VERSION
+        value: 3.11.0
