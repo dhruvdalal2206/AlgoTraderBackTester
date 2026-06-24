@@ -19,6 +19,7 @@ Requirements:
 """
 
 import os
+import io
 import logging
 import time
 from datetime import datetime, timedelta
@@ -94,7 +95,7 @@ def get_sp500_symbols() -> list[str]:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(url, headers=headers, timeout=15)
-        tables = pd.read_html(response.text)
+        tables = pd.read_html(io.StringIO(response.text))
         df = tables[0]
         symbols = df["Symbol"].str.replace(".", "-", regex=False).tolist()
         log.info(f"Loaded {len(symbols)} S&P 500 symbols")
