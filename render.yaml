@@ -2,12 +2,12 @@
 # Docs: https://render.com/docs/yaml-spec
 
 services:
-  - type: worker                        # background worker (no HTTP port needed)
+  - type: web                           # web service (listens on PORT)
     name: sp500-trading-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python trading_bot.py
-    plan: starter                       # ~$7/mo; keeps the process alive 24/7
+    plan: free                          # Free tier keeps the process alive if pinged
     envVars:
       - key: ALPACA_API_KEY
         sync: false                     # set manually in Render dashboard (secret)

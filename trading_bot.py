@@ -22,7 +22,9 @@ import os
 import io
 import logging
 import time
+import threading
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
 
@@ -394,6 +396,27 @@ def run_tick():
 
 
 # ─────────────────────────────────────────────
+# HTTP HEALTH CHECK SERVER
+# ─────────────────────────────────────────────
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is healthy and running!")
+
+    def log_message(self, format, *args):
+        # Suppress logging to keep output clean
+        return
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    log.info(f"Starting health check server on port {port}...")
+    server.serve_forever()
+
+
+# ─────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
@@ -412,6 +435,10 @@ if __name__ == "__main__":
     log.info(f"    Position size          : ${POSITION_SIZE_USD}")
     log.info(f"    Max positions          : {MAX_OPEN_POSITIONS}")
     log.info("=" * 60)
+
+    # Start health check server in a background thread for Render
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
 
     scheduler = BlockingScheduler(timezone=IST)
 
