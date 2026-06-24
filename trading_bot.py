@@ -40,7 +40,7 @@ from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 # ─────────────────────────────────────────────
 # CONFIGURATION  (set via environment variables)
@@ -130,7 +130,7 @@ def is_market_open() -> bool:
 # ─────────────────────────────────────────────
 # DATA HELPERS
 # ─────────────────────────────────────────────
-def get_bars(symbol: str, limit: int = 25, timeframe: TimeFrame = TimeFrame.FiveMinutes) -> pd.DataFrame:
+def get_bars(symbol: str, limit: int = 25, timeframe: TimeFrame = TimeFrame(5, TimeFrameUnit.Minute)) -> pd.DataFrame:
     """Fetch recent OHLCV bars for a symbol."""
     try:
         # Request data from the last 5 days to ensure we cover weekends/market closes
@@ -166,7 +166,7 @@ def get_daily_change(symbol: str) -> float | None:
     """
     try:
         # Request up to 100 bars (5-minute interval) to ensure we cover the whole day (78 bars)
-        bars = get_bars(symbol, limit=100, timeframe=TimeFrame.FiveMinutes)
+        bars = get_bars(symbol, limit=100, timeframe=TimeFrame(5, TimeFrameUnit.Minute))
         if bars.empty:
             return None
         
@@ -188,7 +188,7 @@ def get_daily_change(symbol: str) -> float | None:
 
 def get_current_price(symbol: str) -> float | None:
     """Get the latest close price from 5-minute bars."""
-    bars = get_bars(symbol, limit=2, timeframe=TimeFrame.FiveMinutes)
+    bars = get_bars(symbol, limit=2, timeframe=TimeFrame(5, TimeFrameUnit.Minute))
     if bars.empty:
         return None
     return float(bars.iloc[-1]["close"])
@@ -249,7 +249,7 @@ def scan_for_entries():
             continue
 
         # ── 2. Get 20-bar SMA on 5-min bars ──────────────────────────
-        bars = get_bars(symbol, limit=SMA_PERIOD + 5, timeframe=TimeFrame.FiveMinutes)
+        bars = get_bars(symbol, limit=SMA_PERIOD + 5, timeframe=TimeFrame(5, TimeFrameUnit.Minute))
         if bars.empty or len(bars) < SMA_PERIOD:
             continue
 
