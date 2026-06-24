@@ -90,24 +90,25 @@ open_trades: dict = {}
 # S&P 500 SYMBOL LIST
 # ─────────────────────────────────────────────
 def get_sp500_symbols() -> list[str]:
-    """Fetch current S&P 500 tickers from Wikipedia."""
+    """Load S&P 500 tickers from local sp500.txt file."""
     try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(url, headers=headers, timeout=15)
-        tables = pd.read_html(io.StringIO(response.text))
-        df = tables[0]
-        symbols = df["Symbol"].str.replace(".", "-", regex=False).tolist()
-        log.info(f"Loaded {len(symbols)} S&P 500 symbols")
-        return symbols
+        file_path = os.path.join(os.path.dirname(__file__), "sp500.txt")
+        if os.path.exists(file_path):
+            with open(file_path, "r") as f:
+                symbols = [line.strip() for line in f if line.strip()]
+            log.info(f"Loaded {len(symbols)} S&P 500 symbols from local sp500.txt")
+            return symbols
+        else:
+            raise FileNotFoundError("Local sp500.txt file not found.")
     except Exception as e:
-        log.error(f"Failed to fetch S&P 500 list: {e}. Using fallback list.")
+        log.error(f"Failed to load S&P 500 list from local file: {e}. Using fallback list.")
         # Fallback: top 20 liquid S&P 500 names
         return [
             "AAPL","MSFT","AMZN","NVDA","GOOGL","META","TSLA","BRK-B",
             "JPM","UNH","V","XOM","JNJ","PG","MA","HD","CVX","MRK",
             "ABBV","LLY"
         ]
+
 
 
 SP500_SYMBOLS = get_sp500_symbols()
