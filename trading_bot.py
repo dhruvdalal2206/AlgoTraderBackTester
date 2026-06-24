@@ -130,19 +130,22 @@ def is_market_open() -> bool:
 # ─────────────────────────────────────────────
 # DATA HELPERS
 # ─────────────────────────────────────────────
-def get_bars(symbol: str, limit: int = 25, timeframe: TimeFrame = TimeFrame.Minute) -> pd.DataFrame:
+def get_bars(symbol: str, limit: int = 25, timeframe: TimeFrame = TimeFrame.FiveMinutes) -> pd.DataFrame:
     """Fetch recent OHLCV bars for a symbol."""
     try:
+        # Request data from the last 5 days to ensure we cover weekends/market closes
+        start_time = datetime.now(pytz.utc) - timedelta(days=5)
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=timeframe,
-            limit=limit,
+            start=start_time,
         )
         bars = data_client.get_stock_bars(req).df
         if isinstance(bars.index, pd.MultiIndex):
             bars = bars.xs(symbol, level="symbol")
         bars = bars.sort_index()
-        return bars
+        # Take only the latest 'limit' bars
+        return bars.tail(limit)
     except Exception as e:
         log.debug(f"Bar fetch failed for {symbol}: {e}")
         return pd.DataFrame()
@@ -162,11 +165,19 @@ def get_daily_change(symbol: str) -> float | None:
     (current_price - open_price) / open_price
     """
     try:
-        bars = get_bars(symbol, limit=390, timeframe=TimeFrame.Minute)  # full day
-        if bars.empty or len(bars) < 2:
+        # Request up to 100 bars (5-minute interval) to ensure we cover the whole day (78 bars)
+        bars = get_bars(symbol, limit=100, timeframe=TimeFrame.FiveMinutes)
+        if bars.empty:
             return None
-        open_price  = float(bars.iloc[0]["open"])
-        last_price  = float(bars.iloc[-1]["close"])
+        
+        # Filter for bars from today's NYSE date
+        nyse_today = datetime.now(NYSE_TZ).date()
+        today_bars = bars[bars.index.date == nyse_today]
+        if today_bars.empty or len(today_bars) < 1:
+            return None
+            
+        open_price  = float(today_bars.iloc[0]["open"])
+        last_price  = float(today_bars.iloc[-1]["close"])
         if open_price == 0:
             return None
         return (last_price - open_price) / open_price
@@ -176,8 +187,8 @@ def get_daily_change(symbol: str) -> float | None:
 
 
 def get_current_price(symbol: str) -> float | None:
-    """Get the latest close price from 1-minute bars."""
-    bars = get_bars(symbol, limit=2, timeframe=TimeFrame.Minute)
+    """Get the latest close price from 5-minute bars."""
+    bars = get_bars(symbol, limit=2, timeframe=TimeFrame.FiveMinutes)
     if bars.empty:
         return None
     return float(bars.iloc[-1]["close"])
@@ -237,8 +248,8 @@ def scan_for_entries():
         if change is None or abs(change) < PRICE_CHANGE_THRESHOLD:
             continue
 
-        # ── 2. Get 20-bar SMA on 1-min bars ──────────────────────────
-        bars = get_bars(symbol, limit=SMA_PERIOD + 5, timeframe=TimeFrame.Minute)
+        # ── 2. Get 20-bar SMA on 5-min bars ──────────────────────────
+        bars = get_bars(symbol, limit=SMA_PERIOD + 5, timeframe=TimeFrame.FiveMinutes)
         if bars.empty or len(bars) < SMA_PERIOD:
             continue
 
