@@ -265,27 +265,39 @@ def scan_for_entries():
         if distance > SMA_TOUCH_PCT:
             continue
 
-        # ── 4. All conditions met → place BUY order ──────────────────
+        # ── 4. All conditions met → place order ──────────────────
         qty = max(1, int(POSITION_SIZE_USD / price))
+        is_long = change > 0
+        side = OrderSide.BUY if is_long else OrderSide.SELL
+        
         log.info(
-            f"SIGNAL → {symbol} | price={price:.2f} | SMA={sma:.2f} "
+            f"SIGNAL → {symbol} | {'LONG' if is_long else 'SHORT'} | price={price:.2f} | SMA={sma:.2f} "
             f"| change={change*100:.2f}% | qty={qty}"
         )
 
-        if place_market_order(symbol, qty, OrderSide.BUY):
+        if place_market_order(symbol, qty, side):
             entry_price = price
+            if is_long:
+                stop_loss = round(entry_price * (1 - STOP_LOSS_PCT), 4)
+                target1   = round(entry_price * (1 + TARGET1_PCT), 4)
+                target2   = round(entry_price * (1 + TARGET1_PCT + TARGET2_PCT), 4)
+            else:
+                stop_loss = round(entry_price * (1 + STOP_LOSS_PCT), 4)
+                target1   = round(entry_price * (1 - TARGET1_PCT), 4)
+                target2   = round(entry_price * (1 - TARGET1_PCT - TARGET2_PCT), 4)
+
             open_trades[symbol] = {
                 "entry_price" : entry_price,
-                "stop_loss"   : round(entry_price * (1 - STOP_LOSS_PCT), 4),
-                "target1"     : round(entry_price * (1 + TARGET1_PCT), 4),
-                "target2"     : round(entry_price * (1 + TARGET1_PCT + TARGET2_PCT), 4),
+                "stop_loss"   : stop_loss,
+                "target1"     : target1,
+                "target2"     : target2,
                 "t1_hit"      : False,
                 "qty_total"   : qty,
                 "qty_remaining": qty,
-                "direction"   : "up" if change > 0 else "down",
+                "direction"   : "up" if is_long else "down",
             }
             log.info(
-                f"Trade opened → {symbol} | entry={entry_price:.2f} "
+                f"Trade opened → {symbol} | {'LONG' if is_long else 'SHORT'} | entry={entry_price:.2f} "
                 f"| SL={open_trades[symbol]['stop_loss']:.2f} "
                 f"| T1={open_trades[symbol]['target1']:.2f} "
                 f"| T2={open_trades[symbol]['target2']:.2f}"
@@ -310,40 +322,46 @@ def manage_open_trades():
             to_close.append(symbol)
             continue
 
+        is_long = trade["direction"] == "up"
+        exit_side = OrderSide.SELL if is_long else OrderSide.BUY
+
         # ── Stop-loss hit ─────────────────────────────────────────────
-        if price <= trade["stop_loss"]:
+        sl_hit = (is_long and price <= trade["stop_loss"]) or (not is_long and price >= trade["stop_loss"])
+        if sl_hit:
             log.info(
                 f"STOP-LOSS hit → {symbol} | price={price:.2f} "
-                f"| SL={trade['stop_loss']:.2f} | selling {qty_remaining} shares"
+                f"| SL={trade['stop_loss']:.2f} | closing {qty_remaining} shares"
             )
-            if place_market_order(symbol, qty_remaining, OrderSide.SELL):
+            if place_market_order(symbol, qty_remaining, exit_side):
                 to_close.append(symbol)
             continue
 
         # ── Target 2 hit (sell remaining 50 %) ────────────────────────
-        if trade["t1_hit"] and price >= trade["target2"]:
+        t2_hit = (is_long and price >= trade["target2"]) or (not is_long and price <= trade["target2"])
+        if trade["t1_hit"] and t2_hit:
             log.info(
                 f"TARGET 2 hit → {symbol} | price={price:.2f} "
-                f"| T2={trade['target2']:.2f} | selling {qty_remaining} shares"
+                f"| T2={trade['target2']:.2f} | closing {qty_remaining} shares"
             )
-            if place_market_order(symbol, qty_remaining, OrderSide.SELL):
+            if place_market_order(symbol, qty_remaining, exit_side):
                 to_close.append(symbol)
             continue
 
         # ── Target 1 hit (sell first 50 %) ────────────────────────────
-        if not trade["t1_hit"] and price >= trade["target1"]:
+        t1_hit = (is_long and price >= trade["target1"]) or (not is_long and price <= trade["target1"])
+        if not trade["t1_hit"] and t1_hit:
             half_qty = max(1, qty_remaining // 2)
             log.info(
                 f"TARGET 1 hit → {symbol} | price={price:.2f} "
-                f"| T1={trade['target1']:.2f} | selling {half_qty} of {qty_remaining} shares"
+                f"| T1={trade['target1']:.2f} | closing {half_qty} of {qty_remaining} shares"
             )
-            if place_market_order(symbol, half_qty, OrderSide.SELL):
+            if place_market_order(symbol, half_qty, exit_side):
                 open_trades[symbol]["t1_hit"]       = True
                 open_trades[symbol]["qty_remaining"] = qty_remaining - half_qty
-                # raise stop-loss to break-even after T1
+                # raise/lower stop-loss to break-even after T1
                 open_trades[symbol]["stop_loss"]     = trade["entry_price"]
                 log.info(
-                    f"Stop-loss raised to break-even ({trade['entry_price']:.2f}) for {symbol}"
+                    f"Stop-loss moved to break-even ({trade['entry_price']:.2f}) for {symbol}"
                 )
 
     # Remove closed trades
@@ -357,17 +375,19 @@ def manage_open_trades():
 # ─────────────────────────────────────────────
 def close_all_positions_eod():
     """
-    Liquidate all remaining tracked positions ~5 minutes before NYSE close
+    Liquidate all remaining tracked positions at 1:15 AM IST
     to avoid overnight holds on paper account.
     """
-    nyse_now = datetime.now(NYSE_TZ)
-    # NYSE closes at 16:00 ET; close out at 15:55
-    if nyse_now.hour == 15 and nyse_now.minute >= 55:
-        log.info("EOD: Closing all open positions before market close.")
+    ist_now = datetime.now(IST)
+    # Check if time is 1:15 AM IST or later (up to 2:15 AM to avoid triggering on next day's start)
+    if ist_now.hour == 1 and ist_now.minute >= 15:
+        log.info("EOD (1:15 AM IST reached): Closing all open positions.")
         for symbol, trade in list(open_trades.items()):
             qty = trade["qty_remaining"]
             if qty > 0:
-                place_market_order(symbol, qty, OrderSide.SELL)
+                is_long = trade["direction"] == "up"
+                exit_side = OrderSide.SELL if is_long else OrderSide.BUY
+                place_market_order(symbol, qty, exit_side)
         open_trades.clear()
 
 
