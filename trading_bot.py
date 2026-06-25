@@ -40,7 +40,7 @@ import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, PositionSide
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -60,7 +60,7 @@ STOP_LOSS_PCT          = 0.01   # 1 % stop-loss from entry
 TARGET1_PCT            = 0.015  # +1.5 % → sell 50 %
 TARGET2_PCT            = 0.015  # another +1.5 % from T1 → sell remaining 50 %
 POSITION_SIZE_USD      = 1000   # USD to allocate per trade (adjust to your account size)
-MAX_OPEN_POSITIONS     = 5      # max simultaneous positions
+MAX_OPEN_POSITIONS     = 20     # max simultaneous positions
 
 IST = pytz.timezone("Asia/Kolkata")
 NYSE_TZ = pytz.timezone("America/New_York")
@@ -228,6 +228,12 @@ def get_account_buying_power() -> float:
 # ─────────────────────────────────────────────
 def scan_for_entries():
     """Scan S&P 500 for entry signals and open new trades."""
+    ist_now = datetime.now(IST)
+    # No new trades after 1:00 AM IST
+    if (ist_now.hour == 1 and ist_now.minute >= 0) or ist_now.hour == 2:
+        log.info("After 1:00 AM IST. Skipping entry scans.")
+        return
+
     if len(open_trades) >= MAX_OPEN_POSITIONS:
         log.info(f"Max positions ({MAX_OPEN_POSITIONS}) reached. Skipping scan.")
         return
@@ -413,6 +419,41 @@ def run_tick():
     log.info(f"Open trades: {list(open_trades.keys()) or 'None'}")
 
 
+def initialize_open_trades_from_alpaca():
+    """Load existing open positions from Alpaca on startup to populate open_trades."""
+    try:
+        positions = trade_client.get_all_positions()
+        for pos in positions:
+            symbol = pos.symbol
+            qty = int(pos.qty)
+            entry_price = float(pos.avg_entry_price)
+            direction = "up" if pos.side == PositionSide.LONG else "down"
+            
+            is_long = direction == "up"
+            if is_long:
+                stop_loss = round(entry_price * (1 - STOP_LOSS_PCT), 4)
+                target1   = round(entry_price * (1 + TARGET1_PCT), 4)
+                target2   = round(entry_price * (1 + TARGET1_PCT + TARGET2_PCT), 4)
+            else:
+                stop_loss = round(entry_price * (1 + STOP_LOSS_PCT), 4)
+                target1   = round(entry_price * (1 - TARGET1_PCT), 4)
+                target2   = round(entry_price * (1 - TARGET1_PCT - TARGET2_PCT), 4)
+                
+            open_trades[symbol] = {
+                "entry_price" : entry_price,
+                "stop_loss"   : stop_loss,
+                "target1"     : target1,
+                "target2"     : target2,
+                "t1_hit"      : False,
+                "qty_total"   : abs(qty),
+                "qty_remaining": abs(qty),
+                "direction"   : direction,
+            }
+        log.info(f"Initialized {len(open_trades)} active positions from Alpaca: {list(open_trades.keys())}")
+    except Exception as e:
+        log.error(f"Failed to initialize open positions from Alpaca: {e}")
+
+
 # ─────────────────────────────────────────────
 # HTTP HEALTH CHECK SERVER
 # ─────────────────────────────────────────────
@@ -453,6 +494,9 @@ if __name__ == "__main__":
     log.info(f"    Position size          : ${POSITION_SIZE_USD}")
     log.info(f"    Max positions          : {MAX_OPEN_POSITIONS}")
     log.info("=" * 60)
+
+    # Initialize active positions from Alpaca
+    initialize_open_trades_from_alpaca()
 
     # Start health check server in a background thread for Render
     health_thread = threading.Thread(target=start_health_server, daemon=True)
