@@ -53,14 +53,15 @@ API_SECRET = os.environ.get("ALPACA_API_SECRET", "YOUR_PAPER_API_SECRET")
 BASE_URL   = "https://paper-api.alpaca.markets"   # paper trading endpoint
 
 # Risk parameters
-PRICE_CHANGE_THRESHOLD = 0.02   # 2 % intraday move required
+PRICE_CHANGE_THRESHOLD = 0.015  # 1.5 % intraday move required
 SMA_PERIOD             = 20     # 20-bar SMA
 SMA_TOUCH_PCT          = 0.005  # price must be within 0.5 % of SMA to count as "touching"
-STOP_LOSS_PCT          = 0.01   # 1 % stop-loss from entry
-TARGET1_PCT            = 0.015  # +1.5 % → sell 50 %
-TARGET2_PCT            = 0.015  # another +1.5 % from T1 → sell remaining 50 %
-POSITION_SIZE_USD      = 1000   # USD to allocate per trade (adjust to your account size)
+STOP_LOSS_PCT          = 0.015  # 1.5 % stop-loss from entry
+TARGET1_PCT            = 0.02   # +2.0 % → sell 50 %
+TARGET2_PCT            = 0.02   # another +2.0 % from T1 → sell remaining 50 %
+POSITION_SIZE_USD      = 1000   # USD fallback allocation per trade
 MAX_OPEN_POSITIONS     = 20     # max simultaneous positions
+LEVERAGE_MULTIPLIER    = 2.0    # 2x intraday leverage
 
 IST = pytz.timezone("Asia/Kolkata")
 NYSE_TZ = pytz.timezone("America/New_York")
@@ -253,8 +254,8 @@ def scan_for_entries():
         log.warning("Could not fetch account equity. Using fallback position size of $1000.")
         position_size = 1000.0
     else:
-        # Equal allocation: divide total equity by max open positions (e.g. 5% of equity per trade if max=20)
-        position_size = equity / MAX_OPEN_POSITIONS
+        # Equal allocation with leverage: divide (equity * leverage) by max positions
+        position_size = (equity * LEVERAGE_MULTIPLIER) / MAX_OPEN_POSITIONS
 
     buying_power = get_account_buying_power()
     if buying_power < position_size:
@@ -509,7 +510,7 @@ if __name__ == "__main__":
     log.info(f"    Stop-loss              : {STOP_LOSS_PCT*100:.1f}%")
     log.info(f"    Target 1               : +{TARGET1_PCT*100:.1f}% (sell 50%)")
     log.info(f"    Target 2               : +{(TARGET1_PCT+TARGET2_PCT)*100:.1f}% from entry (sell 50%)")
-    log.info(f"    Position size          : Dynamic (Total Equity / {MAX_OPEN_POSITIONS})")
+    log.info(f"    Position size          : Dynamic (Total Equity * {LEVERAGE_MULTIPLIER} / {MAX_OPEN_POSITIONS})")
     log.info(f"    Max positions          : {MAX_OPEN_POSITIONS}")
     log.info("=" * 60)
 
