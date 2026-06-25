@@ -198,6 +198,22 @@ def get_current_price(symbol: str) -> float | None:
 # ─────────────────────────────────────────────
 # ORDER HELPERS
 # ─────────────────────────────────────────────
+def log_portfolio_market_value():
+    """Fetch all positions from Alpaca and log the sum of their market values (raw and absolute)."""
+    try:
+        # Give a moment for the order to settle on Alpaca before querying positions
+        time.sleep(1.0)
+        positions = trade_client.get_all_positions()
+        raw_mv_sum = sum(float(pos.market_value) for pos in positions if pos.market_value is not None)
+        abs_mv_sum = sum(abs(float(pos.market_value)) for pos in positions if pos.market_value is not None)
+        log.info(
+            f"[PORTFOLIO SUMMARY] Raw Market Value Sum: ${raw_mv_sum:.2f} | "
+            f"Absolute Exposure: ${abs_mv_sum:.2f} | Open Positions: {len(positions)}"
+        )
+    except Exception as e:
+        log.error(f"Failed to log portfolio market value: {e}")
+
+
 def place_market_order(symbol: str, qty: int, side: OrderSide) -> bool:
     """Submit a market order. Returns True on success."""
     try:
@@ -209,6 +225,8 @@ def place_market_order(symbol: str, qty: int, side: OrderSide) -> bool:
         )
         order = trade_client.submit_order(req)
         log.info(f"Order placed → {side.value.upper()} {qty} {symbol} | id={order.id}")
+        # Log the updated portfolio market value after the order is placed
+        threading.Thread(target=log_portfolio_market_value, daemon=True).start()
         return True
     except Exception as e:
         log.error(f"Order failed for {symbol}: {e}")
@@ -469,6 +487,12 @@ def initialize_open_trades_from_alpaca():
                 "direction"   : direction,
             }
         log.info(f"Initialized {len(open_trades)} active positions from Alpaca: {list(open_trades.keys())}")
+        raw_mv_sum = sum(float(pos.market_value) for pos in positions if pos.market_value is not None)
+        abs_mv_sum = sum(abs(float(pos.market_value)) for pos in positions if pos.market_value is not None)
+        log.info(
+            f"[PORTFOLIO SUMMARY] Raw Market Value Sum: ${raw_mv_sum:.2f} | "
+            f"Absolute Exposure: ${abs_mv_sum:.2f} | Open Positions: {len(positions)}"
+        )
     except Exception as e:
         log.error(f"Failed to initialize open positions from Alpaca: {e}")
 
