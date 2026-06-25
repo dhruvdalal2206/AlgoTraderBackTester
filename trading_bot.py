@@ -223,6 +223,16 @@ def get_account_buying_power() -> float:
         return 0.0
 
 
+def get_account_equity() -> float:
+    """Return total account equity in USD."""
+    try:
+        account = trade_client.get_account()
+        return float(account.equity)
+    except Exception as e:
+        log.error(f"Failed to fetch account equity: {e}")
+        return 0.0
+
+
 # ─────────────────────────────────────────────
 # ENTRY LOGIC
 # ─────────────────────────────────────────────
@@ -238,9 +248,17 @@ def scan_for_entries():
         log.info(f"Max positions ({MAX_OPEN_POSITIONS}) reached. Skipping scan.")
         return
 
+    equity = get_account_equity()
+    if equity <= 0:
+        log.warning("Could not fetch account equity. Using fallback position size of $1000.")
+        position_size = 1000.0
+    else:
+        # Equal allocation: divide total equity by max open positions (e.g. 5% of equity per trade if max=20)
+        position_size = equity / MAX_OPEN_POSITIONS
+
     buying_power = get_account_buying_power()
-    if buying_power < POSITION_SIZE_USD:
-        log.info(f"Insufficient buying power: ${buying_power:.2f}")
+    if buying_power < position_size:
+        log.info(f"Insufficient buying power: ${buying_power:.2f} (Required: ${position_size:.2f})")
         return
 
     candidates = [s for s in SP500_SYMBOLS if s not in open_trades]
@@ -270,7 +288,7 @@ def scan_for_entries():
             continue
 
         # ── 4. All conditions met → place order ──────────────────
-        qty = max(1, int(POSITION_SIZE_USD / price))
+        qty = max(1, int(position_size / price))
         is_long = change > 0
         side = OrderSide.BUY if is_long else OrderSide.SELL
         
@@ -491,7 +509,7 @@ if __name__ == "__main__":
     log.info(f"    Stop-loss              : {STOP_LOSS_PCT*100:.1f}%")
     log.info(f"    Target 1               : +{TARGET1_PCT*100:.1f}% (sell 50%)")
     log.info(f"    Target 2               : +{(TARGET1_PCT+TARGET2_PCT)*100:.1f}% from entry (sell 50%)")
-    log.info(f"    Position size          : ${POSITION_SIZE_USD}")
+    log.info(f"    Position size          : Dynamic (Total Equity / {MAX_OPEN_POSITIONS})")
     log.info(f"    Max positions          : {MAX_OPEN_POSITIONS}")
     log.info("=" * 60)
 
