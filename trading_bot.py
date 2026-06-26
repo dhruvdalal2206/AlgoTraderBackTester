@@ -52,19 +52,36 @@ API_KEY    = os.environ.get("ALPACA_API_KEY", "YOUR_PAPER_API_KEY")
 API_SECRET = os.environ.get("ALPACA_API_SECRET", "YOUR_PAPER_API_SECRET")
 BASE_URL   = "https://paper-api.alpaca.markets"   # paper trading endpoint
 
-# Risk parameters
-PRICE_CHANGE_THRESHOLD = 0.015  # 1.5 % intraday move required
-SMA_PERIOD             = 20     # 20-bar SMA
-SMA_TOUCH_PCT          = 0.005  # price must be within 0.5 % of SMA to count as "touching"
-STOP_LOSS_PCT          = 0.015  # 1.5 % stop-loss from entry
-TARGET1_PCT            = 0.02   # +2.0 % → sell 50 %
-TARGET2_PCT            = 0.02   # another +2.0 % from T1 → sell remaining 50 %
-POSITION_SIZE_USD      = 1000   # USD fallback allocation per trade
-MAX_OPEN_POSITIONS     = 20     # max simultaneous positions
-LEVERAGE_MULTIPLIER    = 2.0    # 2x intraday leverage
+# Risk parameters (loaded from environment variables on Render, with fallbacks)
+PRICE_CHANGE_THRESHOLD = float(os.environ.get("PRICE_CHANGE_THRESHOLD", 0.015))
+SMA_PERIOD             = int(os.environ.get("SMA_PERIOD", 20))
+SMA_TOUCH_PCT          = float(os.environ.get("SMA_TOUCH_PCT", 0.005))
+STOP_LOSS_PCT          = float(os.environ.get("STOP_LOSS_PCT", 0.015))
+TARGET1_PCT            = float(os.environ.get("TARGET1_PCT", 0.02))
+TARGET2_PCT            = float(os.environ.get("TARGET2_PCT", 0.02))
+POSITION_SIZE_USD      = float(os.environ.get("POSITION_SIZE_USD", 1000))
+MAX_OPEN_POSITIONS     = int(os.environ.get("MAX_OPEN_POSITIONS", 20))
+LEVERAGE_MULTIPLIER    = float(os.environ.get("LEVERAGE_MULTIPLIER", 2.0))
 
 IST = pytz.timezone("Asia/Kolkata")
 NYSE_TZ = pytz.timezone("America/New_York")
+
+# Webhook Alert URL (Discord/Telegram)
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+
+def send_notification(message: str):
+    """Send a webhook notification to Discord or Telegram if configured."""
+    if not WEBHOOK_URL:
+        return
+    try:
+        if "discord.com" in WEBHOOK_URL:
+            requests.post(WEBHOOK_URL, json={"content": message}, timeout=5)
+        elif "api.telegram.org" in WEBHOOK_URL:
+            requests.post(WEBHOOK_URL, json={"text": message}, timeout=5)
+        else:
+            requests.post(WEBHOOK_URL, json={"text": message}, timeout=5)
+    except Exception as e:
+        log.error(f"Failed to send webhook notification: {e}")
 
 # ─────────────────────────────────────────────
 # LOGGING
@@ -94,24 +111,40 @@ open_trades: dict = {}
 # S&P 500 SYMBOL LIST
 # ─────────────────────────────────────────────
 def get_sp500_symbols() -> list[str]:
-    """Load S&P 500 tickers from local sp500.txt file."""
+    """Fetch S&P 500 symbols from Wikipedia with robust fallbacks."""
     try:
-        file_path = os.path.join(os.path.dirname(__file__), "sp500.txt")
-        if os.path.exists(file_path):
-            with open(file_path, "r") as f:
-                symbols = [line.strip() for line in f if line.strip()]
-            log.info(f"Loaded {len(symbols)} S&P 500 symbols from local sp500.txt")
-            return symbols
-        else:
-            raise FileNotFoundError("Local sp500.txt file not found.")
+        log.info("Fetching S&P 500 symbols dynamically from Wikipedia...")
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"}
+        # Use StringIO to avoid Pandas read_html deprecation warning
+        response = requests.get(url, headers=headers, timeout=10)
+        tables = pd.read_html(io.StringIO(response.text))
+        df = tables[0]
+        # Wikipedia uses '.' instead of '-' for some tickers (e.g. BRK.B).
+        # Alpaca uses '-' (e.g. BRK-B) or normal letters. Let's replace '.' with '-'
+        symbols = [sym.replace(".", "-") for sym in df["Symbol"].tolist()]
+        log.info(f"Successfully fetched {len(symbols)} S&P 500 symbols from Wikipedia.")
+        return symbols
     except Exception as e:
-        log.error(f"Failed to load S&P 500 list from local file: {e}. Using fallback list.")
-        # Fallback: top 20 liquid S&P 500 names
-        return [
-            "AAPL","MSFT","AMZN","NVDA","GOOGL","META","TSLA","BRK-B",
-            "JPM","UNH","V","XOM","JNJ","PG","MA","HD","CVX","MRK",
-            "ABBV","LLY"
-        ]
+        log.warning(f"Failed to fetch S&P 500 symbols from Wikipedia: {e}. Falling back to local file.")
+        # Fallback 1: Local file
+        try:
+            file_path = os.path.join(os.path.dirname(__file__), "sp500.txt")
+            if os.path.exists(file_path):
+                with open(file_path, "r") as f:
+                    symbols = [line.strip() for line in f if line.strip()]
+                log.info(f"Loaded {len(symbols)} S&P 500 symbols from local sp500.txt")
+                return symbols
+            else:
+                raise FileNotFoundError("Local sp500.txt file not found.")
+        except Exception as ex:
+            log.error(f"Failed to load S&P 500 list from local file: {ex}. Using fallback list.")
+            # Fallback 2: Hardcoded top liquid symbols
+            return [
+                "AAPL","MSFT","AMZN","NVDA","GOOGL","META","TSLA","BRK-B",
+                "JPM","UNH","V","XOM","JNJ","PG","MA","HD","CVX","MRK",
+                "ABBV","LLY"
+            ]
 
 
 
@@ -134,65 +167,12 @@ def is_market_open() -> bool:
 # ─────────────────────────────────────────────
 # DATA HELPERS
 # ─────────────────────────────────────────────
-def get_bars(symbol: str, limit: int = 25, timeframe: TimeFrame = None) -> pd.DataFrame:
-    """Fetch recent OHLCV bars for a symbol from Yahoo Finance (yfinance)."""
-    try:
-        # Fetch 5-minute bars over the last 5 days (covers weekends/market closes)
-        ticker = yf.Ticker(symbol)
-        bars = ticker.history(period="5d", interval="5m")
-        if bars.empty:
-            return pd.DataFrame()
-        # Lowercase columns to match standard format (open, high, low, close, volume)
-        bars.columns = [c.lower() for c in bars.columns]
-        bars = bars.sort_index()
-        # Take only the latest 'limit' bars
-        return bars.tail(limit)
-    except Exception as e:
-        log.debug(f"Yahoo Finance bar fetch failed for {symbol}: {e}")
-        return pd.DataFrame()
-
-
 def compute_sma(bars: pd.DataFrame, period: int = 20) -> float | None:
     """Compute the simple moving average of close prices."""
     closes = bars["close"].values
     if len(closes) < period:
         return None
     return float(np.mean(closes[-period:]))
-
-
-def get_daily_change(symbol: str) -> float | None:
-    """
-    Return today's intraday percentage change:
-    (current_price - open_price) / open_price
-    """
-    try:
-        # Request up to 100 bars (5-minute interval) to ensure we cover the whole day (78 bars)
-        bars = get_bars(symbol, limit=100, timeframe=TimeFrame(5, TimeFrameUnit.Minute))
-        if bars.empty:
-            return None
-        
-        # Filter for bars from today's NYSE date
-        nyse_today = datetime.now(NYSE_TZ).date()
-        today_bars = bars[bars.index.date == nyse_today]
-        if today_bars.empty or len(today_bars) < 1:
-            return None
-            
-        open_price  = float(today_bars.iloc[0]["open"])
-        last_price  = float(today_bars.iloc[-1]["close"])
-        if open_price == 0:
-            return None
-        return (last_price - open_price) / open_price
-    except Exception as e:
-        log.debug(f"Daily change error for {symbol}: {e}")
-        return None
-
-
-def get_current_price(symbol: str) -> float | None:
-    """Get the latest close price from 5-minute bars."""
-    bars = get_bars(symbol, limit=2, timeframe=TimeFrame(5, TimeFrameUnit.Minute))
-    if bars.empty:
-        return None
-    return float(bars.iloc[-1]["close"])
 
 
 # ─────────────────────────────────────────────
@@ -255,8 +235,8 @@ def get_account_equity() -> float:
 # ─────────────────────────────────────────────
 # ENTRY LOGIC
 # ─────────────────────────────────────────────
-def scan_for_entries():
-    """Scan S&P 500 for entry signals and open new trades."""
+def scan_for_entries(bulk_data):
+    """Scan S&P 500 for entry signals and open new trades using bulk data."""
     ist_now = datetime.now(IST)
     # No new trades after 1:00 AM IST
     if (ist_now.hour == 1 and ist_now.minute >= 0) or ist_now.hour == 2:
@@ -286,22 +266,38 @@ def scan_for_entries():
         if len(open_trades) >= MAX_OPEN_POSITIONS:
             break
 
-        # ── 1. Check intraday change ≥ ±2 % ──────────────────────────
-        change = get_daily_change(symbol)
-        if change is None or abs(change) < PRICE_CHANGE_THRESHOLD:
+        if symbol not in bulk_data:
+            continue
+
+        symbol_df = bulk_data[symbol].dropna(subset=['Close'])
+        if symbol_df.empty or len(symbol_df) < SMA_PERIOD:
+            continue
+
+        # Rename columns to lowercase for compatibility
+        symbol_df = symbol_df.copy()
+        symbol_df.columns = [c.lower() for c in symbol_df.columns]
+
+        # ── 1. Check intraday change ≥ ±PRICE_CHANGE_THRESHOLD ──────
+        nyse_today = datetime.now(NYSE_TZ).date()
+        today_bars = symbol_df[symbol_df.index.date == nyse_today]
+        if today_bars.empty:
+            continue
+
+        open_price = float(today_bars.iloc[0]["open"])
+        price = float(today_bars.iloc[-1]["close"])
+        if open_price == 0:
+            continue
+
+        change = (price - open_price) / open_price
+        if abs(change) < PRICE_CHANGE_THRESHOLD:
             continue
 
         # ── 2. Get 20-bar SMA on 5-min bars ──────────────────────────
-        bars = get_bars(symbol, limit=SMA_PERIOD + 5, timeframe=TimeFrame(5, TimeFrameUnit.Minute))
-        if bars.empty or len(bars) < SMA_PERIOD:
-            continue
-
-        sma   = compute_sma(bars, SMA_PERIOD)
-        price = float(bars.iloc[-1]["close"])
+        sma = compute_sma(symbol_df, SMA_PERIOD)
         if sma is None or sma == 0:
             continue
 
-        # ── 3. Price is "touching" the SMA (within 0.5 %) ────────────
+        # ── 3. Price is "touching" the SMA (within SMA_TOUCH_PCT) ────
         distance = abs(price - sma) / sma
         if distance > SMA_TOUCH_PCT:
             continue
@@ -343,20 +339,30 @@ def scan_for_entries():
                 f"| T1={open_trades[symbol]['target1']:.2f} "
                 f"| T2={open_trades[symbol]['target2']:.2f}"
             )
+            send_notification(
+                f"🔔 **TRADE OPENED**: {symbol} | {'LONG' if is_long else 'SHORT'} | entry={entry_price:.2f} "
+                f"| SL={open_trades[symbol]['stop_loss']:.2f} "
+                f"| T1={open_trades[symbol]['target1']:.2f} "
+                f"| T2={open_trades[symbol]['target2']:.2f}"
+            )
             time.sleep(0.3)   # rate-limit courtesy
 
 
 # ─────────────────────────────────────────────
 # EXIT LOGIC
 # ─────────────────────────────────────────────
-def manage_open_trades():
-    """Check all open positions for stop-loss or target hits."""
+def manage_open_trades(bulk_data):
+    """Check all open positions for stop-loss or target hits using bulk data."""
     to_close = []
 
     for symbol, trade in list(open_trades.items()):
-        price = get_current_price(symbol)
-        if price is None:
+        if symbol not in bulk_data:
             continue
+        symbol_df = bulk_data[symbol].dropna(subset=['Close'])
+        if symbol_df.empty:
+            continue
+        
+        price = float(symbol_df.iloc[-1]['Close'])
 
         qty_remaining = trade["qty_remaining"]
         if qty_remaining <= 0:
@@ -373,6 +379,10 @@ def manage_open_trades():
                 f"STOP-LOSS hit → {symbol} | price={price:.2f} "
                 f"| SL={trade['stop_loss']:.2f} | closing {qty_remaining} shares"
             )
+            send_notification(
+                f"🔴 **STOP-LOSS HIT**: {symbol} | price={price:.2f} "
+                f"| SL={trade['stop_loss']:.2f} | closing {qty_remaining} shares"
+            )
             if place_market_order(symbol, qty_remaining, exit_side):
                 to_close.append(symbol)
             continue
@@ -382,6 +392,10 @@ def manage_open_trades():
         if trade["t1_hit"] and t2_hit:
             log.info(
                 f"TARGET 2 hit → {symbol} | price={price:.2f} "
+                f"| T2={trade['target2']:.2f} | closing {qty_remaining} shares"
+            )
+            send_notification(
+                f"🟢 **TARGET 2 HIT**: {symbol} | price={price:.2f} "
                 f"| T2={trade['target2']:.2f} | closing {qty_remaining} shares"
             )
             if place_market_order(symbol, qty_remaining, exit_side):
@@ -394,6 +408,10 @@ def manage_open_trades():
             half_qty = max(1, qty_remaining // 2)
             log.info(
                 f"TARGET 1 hit → {symbol} | price={price:.2f} "
+                f"| T1={trade['target1']:.2f} | closing {half_qty} of {qty_remaining} shares"
+            )
+            send_notification(
+                f"🟢 **TARGET 1 HIT**: {symbol} | price={price:.2f} "
                 f"| T1={trade['target1']:.2f} | closing {half_qty} of {qty_remaining} shares"
             )
             if place_market_order(symbol, half_qty, exit_side):
@@ -416,20 +434,29 @@ def manage_open_trades():
 # ─────────────────────────────────────────────
 def close_all_positions_eod():
     """
-    Liquidate all remaining tracked positions at 1:15 AM IST
-    to avoid overnight holds on paper account.
+    Liquidate ALL open positions directly from Alpaca API at 1:15 AM IST
+    to guarantee zero overnight holds.
     """
     ist_now = datetime.now(IST)
-    # Check if time is 1:15 AM IST or later (up to 2:15 AM to avoid triggering on next day's start)
     if ist_now.hour == 1 and ist_now.minute >= 15:
-        log.info("EOD (1:15 AM IST reached): Closing all open positions.")
-        for symbol, trade in list(open_trades.items()):
-            qty = trade["qty_remaining"]
-            if qty > 0:
-                is_long = trade["direction"] == "up"
+        log.info("EOD (1:15 AM IST reached): Liquidating all open positions on Alpaca account.")
+        send_notification("🧹 **EOD SQUARE-OFF**: Liquidating all open positions on Alpaca account.")
+        try:
+            positions = trade_client.get_all_positions()
+            if not positions:
+                log.info("No open positions to liquidate.")
+                return
+            for pos in positions:
+                symbol = pos.symbol
+                qty = abs(int(pos.qty))
+                is_long = pos.side == PositionSide.LONG
                 exit_side = OrderSide.SELL if is_long else OrderSide.BUY
+                log.info(f"EOD Liquidating {symbol} | qty={qty} | side={pos.side}")
                 place_market_order(symbol, qty, exit_side)
-        open_trades.clear()
+            open_trades.clear()
+        except Exception as e:
+            log.error(f"EOD liquidation failed: {e}")
+            send_notification(f"⚠️ **EOD LIQUIDATION ERROR**: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -444,14 +471,37 @@ def run_tick():
         log.info("Market is closed. Waiting...")
         return
 
+    # Identify tickers we need to fetch data for
+    tickers_to_fetch = list(set(SP500_SYMBOLS + list(open_trades.keys())))
+    if not tickers_to_fetch:
+        log.info("No tickers to fetch.")
+        return
+
+    try:
+        log.info(f"Bulk downloading data for {len(tickers_to_fetch)} symbols...")
+        bulk_data = yf.download(
+            tickers=tickers_to_fetch,
+            period="5d",
+            interval="5m",
+            group_by="ticker",
+            threads=15,
+            progress=False,
+            timeout=15
+        )
+        if bulk_data.empty:
+            raise ValueError("Bulk data download returned an empty DataFrame.")
+    except Exception as e:
+        log.error(f"Bulk download failed: {e}. Skipping this tick.")
+        return
+
     # 1. Manage exits first
-    manage_open_trades()
+    manage_open_trades(bulk_data)
 
     # 2. Check EOD liquidation
     close_all_positions_eod()
 
     # 3. Scan for new entries
-    scan_for_entries()
+    scan_for_entries(bulk_data)
 
     log.info(f"Open trades: {list(open_trades.keys()) or 'None'}")
 
@@ -493,8 +543,13 @@ def initialize_open_trades_from_alpaca():
             f"[PORTFOLIO SUMMARY] Raw Market Value Sum: ${raw_mv_sum:.2f} | "
             f"Absolute Exposure: ${abs_mv_sum:.2f} | Open Positions: {len(positions)}"
         )
+        send_notification(
+            f"🚀 **BOT STARTUP**: Loaded {len(open_trades)} active positions. "
+            f"Raw MV: ${raw_mv_sum:.2f} | Absolute Exposure: ${abs_mv_sum:.2f}"
+        )
     except Exception as e:
         log.error(f"Failed to initialize open positions from Alpaca: {e}")
+        send_notification(f"⚠️ **BOT STARTUP ERROR**: {e}")
 
 
 # ─────────────────────────────────────────────
