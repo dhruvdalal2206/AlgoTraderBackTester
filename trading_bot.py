@@ -105,6 +105,7 @@ data_client  = StockHistoricalDataClient(API_KEY, API_SECRET)
 # Structure: { symbol: { entry_price, stop_loss, target1, target2,
 #                        t1_hit, qty_total, qty_remaining } }
 open_trades: dict = {}
+eod_summary_sent_date = None
 
 
 # ─────────────────────────────────────────────
@@ -435,25 +436,52 @@ def manage_open_trades(bulk_data):
 def close_all_positions_eod():
     """
     Liquidate ALL open positions directly from Alpaca API at 1:15 AM IST
-    to guarantee zero overnight holds.
+    to guarantee zero overnight holds, and send a daily summary.
     """
+    global eod_summary_sent_date
     ist_now = datetime.now(IST)
+    today_str = ist_now.strftime("%Y-%m-%d")
+
+    # Check if time is 1:15 AM IST or later
     if ist_now.hour == 1 and ist_now.minute >= 15:
+        if eod_summary_sent_date == today_str:
+            return  # already sent summary for today
+
         log.info("EOD (1:15 AM IST reached): Liquidating all open positions on Alpaca account.")
-        send_notification("🧹 **EOD SQUARE-OFF**: Liquidating all open positions on Alpaca account.")
         try:
             positions = trade_client.get_all_positions()
-            if not positions:
-                log.info("No open positions to liquidate.")
-                return
-            for pos in positions:
-                symbol = pos.symbol
-                qty = abs(int(pos.qty))
-                is_long = pos.side == PositionSide.LONG
-                exit_side = OrderSide.SELL if is_long else OrderSide.BUY
-                log.info(f"EOD Liquidating {symbol} | qty={qty} | side={pos.side}")
-                place_market_order(symbol, qty, exit_side)
+            if positions:
+                send_notification("🧹 **EOD SQUARE-OFF**: Liquidating open positions...")
+                for pos in positions:
+                    symbol = pos.symbol
+                    qty = abs(int(pos.qty))
+                    is_long = pos.side == PositionSide.LONG
+                    exit_side = OrderSide.SELL if is_long else OrderSide.BUY
+                    log.info(f"EOD Liquidating {symbol} | qty={qty} | side={pos.side}")
+                    place_market_order(symbol, qty, exit_side)
+                # Wait 3 seconds for orders to settle before fetching final equity
+                time.sleep(3.0)
+            
             open_trades.clear()
+
+            # Fetch account equity & calculate daily returns
+            account = trade_client.get_account()
+            equity = float(account.equity)
+            last_equity = float(account.last_equity)
+            daily_pnl = equity - last_equity
+            daily_pnl_pct = (daily_pnl / last_equity) * 100 if last_equity > 0 else 0.0
+
+            status_indicator = "🟢" if daily_pnl >= 0 else "🔴"
+            summary_msg = (
+                f"{status_indicator} **DAILY PERFORMANCE SUMMARY** {status_indicator}\n"
+                f"• Ending Equity: ${equity:,.2f}\n"
+                f"• Daily P&L: {daily_pnl:+,.2f} ({daily_pnl_pct:+.2f}%)\n"
+                f"• Positions: All positions successfully squared off."
+            )
+            log.info(summary_msg)
+            send_notification(summary_msg)
+            eod_summary_sent_date = today_str
+
         except Exception as e:
             log.error(f"EOD liquidation failed: {e}")
             send_notification(f"⚠️ **EOD LIQUIDATION ERROR**: {e}")
