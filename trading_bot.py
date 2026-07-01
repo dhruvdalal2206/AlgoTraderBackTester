@@ -62,6 +62,7 @@ TARGET2_PCT            = float(os.environ.get("TARGET2_PCT", 0.02))
 POSITION_SIZE_USD      = float(os.environ.get("POSITION_SIZE_USD", 1000))
 MAX_OPEN_POSITIONS     = int(os.environ.get("MAX_OPEN_POSITIONS", 20))
 LEVERAGE_MULTIPLIER    = float(os.environ.get("LEVERAGE_MULTIPLIER", 2.0))
+STARTING_EQUITY        = float(os.environ.get("STARTING_EQUITY", 100000.0))
 
 IST = pytz.timezone("Asia/Kolkata")
 NYSE_TZ = pytz.timezone("America/New_York")
@@ -471,11 +472,18 @@ def close_all_positions_eod():
             daily_pnl = equity - last_equity
             daily_pnl_pct = (daily_pnl / last_equity) * 100 if last_equity > 0 else 0.0
 
+            # Calculate total returns since inception/start
+            total_return_usd = equity - STARTING_EQUITY
+            total_return_pct = (total_return_usd / STARTING_EQUITY) * 100 if STARTING_EQUITY > 0 else 0.0
+
             status_indicator = "🟢" if daily_pnl >= 0 else "🔴"
+            total_indicator = "🟢" if total_return_usd >= 0 else "🔴"
+
             summary_msg = (
-                f"{status_indicator} **DAILY PERFORMANCE SUMMARY** {status_indicator}\n"
+                f"📊 **DAILY PERFORMANCE REPORT** 📊\n"
                 f"• Ending Equity: ${equity:,.2f}\n"
-                f"• Daily P&L: {daily_pnl:+,.2f} ({daily_pnl_pct:+.2f}%)\n"
+                f"• Today's Change: {daily_pnl:+,.2f} ({daily_pnl_pct:+.2f}%) {status_indicator}\n"
+                f"• Total Return (Since Start): {total_return_usd:+,.2f} ({total_return_pct:+.2f}%) {total_indicator}\n"
                 f"• Positions: All positions successfully squared off."
             )
             log.info(summary_msg)
